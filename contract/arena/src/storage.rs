@@ -1,14 +1,16 @@
 #![allow(dead_code)]
-use crate::types::{ArenaConfig, ArenaError, PlayerState};
-use soroban_sdk::{Address, Env, Vec, contracttype, symbol_short};
+use crate::types::{ArenaConfig, ArenaError, Choice, PlayerState};
+use soroban_sdk::{Address, BytesN, Env, Vec, contracttype, symbol_short};
 
 const CONFIG_KEY: &str = "CONFIG";
 const PLAYERS_KEY: &str = "PLAYERS";
 
-/// Storage key for an individual player's state, keyed by their address.
+/// Storage key for per-player data, keyed by the player's address.
 #[contracttype]
 enum DataKey {
     Player(Address),
+    Commitment(Address),
+    Choice(Address),
 }
 
 pub struct ArenaStorage;
@@ -75,6 +77,41 @@ impl ArenaStorage {
         env.storage()
             .persistent()
             .set(&DataKey::Player(player.clone()), state);
+    }
+
+    /// Store a commitment hash for a player during the commit phase.
+    pub fn save_commitment(env: &Env, player: &Address, commitment: &BytesN<32>) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Commitment(player.clone()), commitment);
+    }
+
+    /// Load a player's stored commitment, or `None` if they never committed.
+    pub fn load_commitment(env: &Env, player: &Address) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Commitment(player.clone()))
+    }
+
+    /// Store a player's revealed choice.
+    pub fn save_choice(env: &Env, player: &Address, choice: &Choice) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Choice(player.clone()), choice);
+    }
+
+    /// Load a player's revealed choice, or `None` if not yet revealed.
+    pub fn load_choice(env: &Env, player: &Address) -> Option<Choice> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Choice(player.clone()))
+    }
+
+    /// Returns `true` if the player has already revealed their choice.
+    pub fn has_revealed(env: &Env, player: &Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::Choice(player.clone()))
     }
 }
 

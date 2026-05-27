@@ -15,6 +15,24 @@ pub enum GameState {
     Cancelled,
 }
 
+/// A player's coin-flip choice for a round.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Choice {
+    Heads,
+    Tails,
+}
+
+impl Choice {
+    /// Returns the canonical byte representation used in the commitment hash.
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Choice::Heads => 0,
+            Choice::Tails => 1,
+        }
+    }
+}
+
 /// Top-level arena configuration stored in persistent storage.
 #[contracttype]
 #[derive(Clone)]
@@ -26,6 +44,9 @@ pub struct ArenaConfig {
     /// Total number of players that have ever joined this arena. Kept in sync
     /// by `ArenaStorage::add_player` so it can be read without scanning storage.
     pub player_count: u32,
+    /// Ledger timestamp (seconds) after which commitments are no longer
+    /// accepted and the reveal phase begins.
+    pub commit_deadline: u64,
 }
 
 /// Per-player state stored in persistent storage, keyed by the player address.
@@ -56,4 +77,16 @@ pub enum ArenaError {
     CannotCancelStartedGame = 2,
     /// Arena configuration has not been initialised.
     NotInitialised = 3,
+    /// Commit phase has ended — the current ledger timestamp is past the
+    /// configured `commit_deadline`.
+    CommitPhaseEnded = 4,
+    /// Reveal phase is not yet active — the commit deadline has not passed.
+    RevealPhaseNotActive = 5,
+    /// The computed hash of (choice | salt) does not match the stored
+    /// commitment for this player.
+    HashMismatch = 6,
+    /// The player has already revealed their choice for this round.
+    AlreadyRevealed = 7,
+    /// No prior commitment was found for this player.
+    NoCommitmentFound = 8,
 }
