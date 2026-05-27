@@ -1,11 +1,12 @@
-#![no_std]
-use soroban_sdk::{Address, Env, Vec, contract, contractimpl, token};
+﻿#![no_std]
+use soroban_sdk::{Address, Bytes, BytesN, Env, Vec, contract, contractimpl, token};
 
+mod snapshot_test;
 mod storage;
 mod types;
 
 use storage::ArenaStorage;
-use types::{ArenaError, GameState, PlayerState};
+use types::{ArenaError, Choice, GameState, PlayerState};
 
 /// Number of players returned per `get_players` page.
 const PAGE_SIZE: u32 = 50;
@@ -62,6 +63,73 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Commit a hidden choice via its hash during the commit phase.
+    ///
+    /// `commitment` must be `sha256(choice.to_byte() | salt)` computed
+    /// off-chain by the player. The contract stores only the hash; the
+    /// actual choice and salt must be revealed later via [`reveal_choice`].
+    pub fn commit_choice(env: Env, player: Address, commitment: BytesN<32>) -> Result<(), ArenaError> {
+        player.require_auth();
+
+        let config = ArenaStorage::load_config(&env)?;
+
+        if env.ledger().timestamp() >= config.commit_deadline {
+            return Err(ArenaError::CommitPhaseEnded);
+        }
+
+        ArenaStorage::save_commitment(&env, &player, &commitment);
+
+        env.events()
+            .publish((soroban_sdk::symbol_short!("committed"), player), ());
+
+        Ok(())
+    }
+
+    /// Reveal a previously committed choice with its salt.
+    ///
+    /// The contract computes `sha256(choice.to_byte() | salt)` and verifies
+    /// it matches the commitment stored during [`commit_choice`].
+    pub fn reveal_choice(
+        env: Env,
+        player: Address,
+        choice: Choice,
+        salt: BytesN<32>,
+    ) -> Result<(), ArenaError> {
+        player.require_auth();
+
+        let config = ArenaStorage::load_config(&env)?;
+
+        if env.ledger().timestamp() < config.commit_deadline {
+            return Err(ArenaError::RevealPhaseNotActive);
+        }
+
+        let stored = ArenaStorage::load_commitment(&env, &player)
+            .ok_or(ArenaError::NoCommitmentFound)?;
+
+        if ArenaStorage::has_revealed(&env, &player) {
+            return Err(ArenaError::AlreadyRevealed);
+        }
+
+        let mut preimage = Bytes::new(&env);
+        preimage.push_back(choice.to_byte());
+        let salt_bytes = salt.to_array();
+        for b in salt_bytes.iter() {
+            preimage.push_back(*b);
+        }
+
+        let computed: BytesN<32> = env.crypto().sha256(&preimage).into();
+        if computed != stored {
+            return Err(ArenaError::HashMismatch);
+        }
+
+        ArenaStorage::save_choice(&env, &player, &choice);
+
+        env.events()
+            .publish((soroban_sdk::symbol_short!("revealed"), player), ());
+
+        Ok(())
+    }
+
     /// Returns a paginated list of all players with their current state.
     ///
     /// `page` is 0-indexed; the page size is [`PAGE_SIZE`] (50). Players are
@@ -113,6 +181,7 @@ mod test {
                 entry_fee: 100,
                 state: GameState::Open,
                 player_count: 0,
+                commit_deadline: u64::MAX,
             };
             ArenaStorage::save_config(&env, &config);
             for _ in 0..n {
@@ -170,5 +239,157 @@ mod test {
 
         // The two pages together cover every player exactly once.
         assert_eq!(page0.len() + page1.len(), client.player_count());
+    }
+
+    fn compute_commitment(env: &Env, choice: Choice, salt: &BytesN<32>) -> BytesN<32> {
+        let mut preimage = Bytes::new(env);
+        preimage.push_back(choice.to_byte());
+        let salt_bytes = salt.to_array();
+        for b in salt_bytes.iter() {
+            preimage.push_back(*b);
+        }
+        env.crypto().sha256(&preimage).into()
+    }
+
+    #[test]
+    fn valid_commit_and_reveal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[42u8; 32]);
+        let choice = Choice::Tails;
+        let commitment = compute_commitment(&env, choice, &salt);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+            };
+            ArenaStorage::save_config(&env, &config);
+            ArenaStorage::save_commitment(&env, &player, &commitment);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        client.reveal_choice(&player, &choice, &salt);
+
+        env.as_contract(&contract_id, || {
+            let stored = ArenaStorage::load_choice(&env, &player).unwrap();
+            assert_eq!(stored, choice);
+        });
+    }
+
+    #[test]
+    fn reveal_hash_mismatch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[7u8; 32]);
+        let commitment = compute_commitment(&env, Choice::Heads, &salt);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+            };
+            ArenaStorage::save_config(&env, &config);
+            ArenaStorage::save_commitment(&env, &player, &commitment);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        let result = client.try_reveal_choice(&player, &Choice::Tails, &salt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reveal_before_deadline_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[3u8; 32]);
+        let commitment = compute_commitment(&env, Choice::Heads, &salt);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 1,
+            };
+            ArenaStorage::save_config(&env, &config);
+            ArenaStorage::save_commitment(&env, &player, &commitment);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        let result = client.try_reveal_choice(&player, &Choice::Heads, &salt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn double_reveal_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[9u8; 32]);
+        let choice = Choice::Heads;
+        let commitment = compute_commitment(&env, choice, &salt);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+            };
+            ArenaStorage::save_config(&env, &config);
+            ArenaStorage::save_commitment(&env, &player, &commitment);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+
+        client.reveal_choice(&player, &choice, &salt);
+
+        let result = client.try_reveal_choice(&player, &choice, &salt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reveal_without_commitment_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[5u8; 32]);
+
+        env.as_contract(&contract_id, || {
+            let config = ArenaConfig {
+                admin: Address::generate(&env),
+                stake_token: Address::generate(&env),
+                entry_fee: 100,
+                state: GameState::Open,
+                player_count: 0,
+                commit_deadline: 0,
+            };
+            ArenaStorage::save_config(&env, &config);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        let result = client.try_reveal_choice(&player, &Choice::Heads, &salt);
+        assert!(result.is_err());
     }
 }
