@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{Address, BytesN, Env, contract, contractimpl, symbol_short, token};
 
+mod snapshot_tests;
 mod storage;
 mod types;
 
