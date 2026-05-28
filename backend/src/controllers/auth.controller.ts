@@ -47,9 +47,15 @@ export class AuthController {
   };
 
   logout = async (req: Request, res: Response): Promise<void> => {
-    const { id } = req.user!;
-    await this.authService.logout(id);
+    const { jti } = req.user!;
+    await this.authService.logout(jti);
     res.json({ message: "Logged out successfully" });
+  };
+
+  revokeAllSessions = async (req: Request, res: Response): Promise<void> => {
+    const { id, walletAddress } = req.user!;
+    const revoked = await this.authService.revokeAllSessions(walletAddress, id);
+    res.json({ message: "All sessions revoked", revoked });
   };
 
   me = async (req: Request, res: Response, next: NextFunction): Promise<void> => {

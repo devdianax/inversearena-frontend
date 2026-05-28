@@ -4,7 +4,8 @@ import jwt from "jsonwebtoken";
 import { Keypair } from "@stellar/stellar-sdk";
 import { NonceModel } from "../db/models/nonce.model";
 import { UserModel } from "../db/models/user.model";
-import { RefreshTokenModel } from "../db/models/refreshToken.model";
+import { RefreshTokenModel, generateFamilyId } from "../db/models/refreshToken.model";
+import { SessionStore, sessionStore as defaultSessionStore } from "../cache/sessionStore";
 import type { AuthUser, JwtPayload, TokenPair } from "../types/auth";
 
 const NONCE_PREFIX = "Sign this message to authenticate with InverseArena:\n";
@@ -31,6 +32,13 @@ function refreshTokenTtlSeconds(): number {
   return 7 * 24 * 60 * 60;
 }
 
+function accessTokenTtlSeconds(): number {
+  const val = Number(process.env.JWT_ACCESS_EXPIRES_IN);
+  if (typeof val === "number" && Number.isFinite(val) && val > 0) return val;
+  // Default 15 minutes
+  return 15 * 60;
+}
+
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -43,6 +51,8 @@ function validateWalletAddress(walletAddress: string): void {
 }
 
 export class AuthService {
+  constructor(private readonly sessions: SessionStore = defaultSessionStore) {}
+
   async requestNonce(walletAddress: string): Promise<{ nonce: string; expiresAt: Date }> {
     validateWalletAddress(walletAddress);
 
@@ -128,6 +138,13 @@ export class AuthService {
       throw err;
     }
 
+    // A token whose JTI has been revoked (logout / revoke-all) is rejected
+    // even if its signature and DB row still look valid.
+    if (payload.jti && !(await this.sessions.isActive(payload.jti))) {
+      const err = Object.assign(new Error("Refresh token has been revoked"), { status: 401 });
+      throw err;
+    }
+
     const tokenHash = hashToken(refreshToken);
     const storedToken = await RefreshTokenModel.findOne({ tokenHash });
 
@@ -143,11 +160,12 @@ export class AuthService {
 
     if (storedToken.used) {
       // Token reuse detected — this is a theft attempt.
-      // Revoke all tokens in this family.
+      // Revoke all tokens in this family and wipe the wallet's active JTIs.
       await RefreshTokenModel.updateMany(
         { familyId: storedToken.familyId },
         { $set: { revoked: true } }
       );
+      await this.sessions.removeAllSessions(payload.wallet);
       const err = Object.assign(
         new Error("Refresh token reuse detected — all sessions invalidated"),
         { status: 401 }
@@ -155,21 +173,42 @@ export class AuthService {
       throw err;
     }
 
-    // Mark the presented token as used
+    // Mark the presented token as used and retire its JTI so the same
+    // refresh token cannot be replayed against the new access token.
     await RefreshTokenModel.findByIdAndUpdate(storedToken._id, { used: true });
+    if (payload.jti) {
+      await this.sessions.removeSession(payload.jti);
+    }
 
     // Issue a new token pair in the same family
     return this.issueTokenPair(payload.sub, payload.wallet, storedToken.familyId);
   }
 
-  async logout(userId: string): Promise<void> {
+  /**
+   * Invalidate a single session. The middleware passes the access token's
+   * jti so only the current device/browser is logged out; other active
+   * sessions for this wallet remain valid.
+   */
+  async logout(jti: string): Promise<void> {
+    await this.sessions.removeSession(jti);
+  }
+
+  /**
+   * Invalidate every session for a wallet. Called from
+   * DELETE /auth/sessions when a wallet is compromised, rotated, or the
+   * user wants a full sign-out. Also revokes all of the user's refresh
+   * tokens so the refresh endpoint cannot mint new sessions.
+   */
+  async revokeAllSessions(walletAddress: string, userId: string): Promise<number> {
+    const revokedCount = await this.sessions.removeAllSessions(walletAddress);
     await RefreshTokenModel.updateMany(
       { userId, revoked: false },
       { $set: { revoked: true } }
     );
+    return revokedCount;
   }
 
-  verifyAccessToken(token: string): JwtPayload {
+  async verifyAccessToken(token: string): Promise<JwtPayload> {
     let payload: JwtPayload;
     try {
       payload = jwt.verify(token, getJwtSecret()) as JwtPayload;
@@ -183,6 +222,14 @@ export class AuthService {
       throw err;
     }
 
+    // Reject tokens whose JTI has been invalidated server-side. This is the
+    // mechanism that lets POST /auth/logout and DELETE /auth/sessions take
+    // effect immediately instead of waiting for the JWT to expire.
+    if (!payload.jti || !(await this.sessions.isActive(payload.jti))) {
+      const err = Object.assign(new Error("Session has been revoked"), { status: 401 });
+      throw err;
+    }
+
     return payload;
   }
 
@@ -192,25 +239,45 @@ export class AuthService {
     existingFamilyId?: string
   ): Promise<TokenPair> {
     const secret = getJwtSecret();
-    const accessPayload: JwtPayload = { sub: userId, wallet: walletAddress, type: "access" };
-    const refreshPayload: JwtPayload = { sub: userId, wallet: walletAddress, type: "refresh" };
+    const accessTtl = accessTokenTtlSeconds();
+    const refreshTtl = refreshTokenTtlSeconds();
+    const accessJti = randomUUID();
+    const refreshJti = randomUUID();
 
+    const accessPayload: JwtPayload = {
+      sub: userId,
+      wallet: walletAddress,
+      type: "access",
+      jti: accessJti,
+    };
+    const refreshPayload: JwtPayload = {
+      sub: userId,
+      wallet: walletAddress,
+      type: "refresh",
+      jti: refreshJti,
+    };
 
+    const accessToken = jwt.sign(accessPayload, secret, { expiresIn: accessTtl });
+    const refreshToken = jwt.sign(refreshPayload, secret, { expiresIn: refreshTtl });
+
+    // Persist the refresh token (hashed) for the family-based rotation
+    // checks in `refreshTokens`. The DB is the durable record; Redis is the
+    // fast-revocation index.
+    await RefreshTokenModel.create({
+      tokenHash: hashToken(refreshToken),
+      familyId: existingFamilyId ?? generateFamilyId(),
+      userId,
+      used: false,
+      revoked: false,
+      expiresAt: new Date(Date.now() + refreshTtl * 1000),
+    });
+
+    // Register both JTIs in Redis so they can be revoked individually
+    // (logout) or wholesale (revoke-all-sessions). The TTL on each key
+    // matches the JWT lifetime, so expired tokens disappear automatically.
+    await this.sessions.addSession(walletAddress, accessJti, accessTtl);
+    await this.sessions.addSession(walletAddress, refreshJti, refreshTtl);
 
     return { accessToken, refreshToken };
-  }
-}
-
-function parseDuration(duration: string): number {
-  const match = duration.match(/^(\d+)\s*(s|m|h|d)$/);
-  if (!match) return 7 * 24 * 60 * 60; // default 7 days
-  const value = parseInt(match[1], 10);
-  const unit = match[2];
-  switch (unit) {
-    case "s": return value;
-    case "m": return value * 60;
-    case "h": return value * 3600;
-    case "d": return value * 86400;
-    default: return 7 * 24 * 60 * 60;
   }
 }
