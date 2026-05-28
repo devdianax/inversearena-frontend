@@ -14,6 +14,7 @@ import {
 } from "@/components/arena/core";
 import { useWallet } from "@/shared-d/hooks/useWallet";
 import { TransactionModal } from "@/components/modals/TransactionModal";
+import { ArenaStatsSkeleton } from "@/components/arena/ArenaStatsSkeleton";
 import {
   buildJoinArenaTransaction,
   buildSubmitChoiceTransaction,
@@ -203,6 +204,10 @@ function ArenaGameView() {
 
           {/* Right column - Stats */}
           <div className="space-y-4">
+            {isLoadingArena ? (
+              <ArenaStatsSkeleton />
+            ) : (
+            <>
             <TotalYieldPot amount={42850.12} apr={12.4} />
 
             {/* Survivors placeholder */}
@@ -285,6 +290,8 @@ function ArenaGameView() {
                 )}
               </div>
             </div>
+            </>
+            )}
           </div>
         </div>
 

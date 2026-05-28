@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+rwa-adapter = { path = "../rwa-adapter" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

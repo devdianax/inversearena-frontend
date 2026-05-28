@@ -3,10 +3,6 @@
  * Named “composer” here to avoid clashing with the SDK’s `TransactionBuilder` class.
  */
 import { Account, Contract, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
-// SDK integration boundary: Operation2<InvokeHostFunction> from Contract.call() is
-// structurally compatible with Operation but TypeScript's nominal check rejects it.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyOperation = any;
 import {
   encodeAddress,
   encodeAmount,
@@ -14,6 +10,8 @@ import {
   encodeRound,
 } from "@/shared-d/utils/scval-helpers";
 import type { CreatePoolParamsValidated } from "@/shared-d/utils/stellar-transaction-schemas";
+
+type SorobanOperation = ReturnType<Contract["call"]>;
 
 /**
  * Assembles an unsigned {@link Transaction} with a single operation (Soroban / classic).
@@ -25,7 +23,7 @@ export function composeUnsignedTransaction(
     fee: string;
     networkPassphrase: string;
     timeout: number;
-    operation: AnyOperation;
+    operation: SorobanOperation;
   },
 ): Transaction {
   return new TransactionBuilder(account, {
@@ -49,7 +47,7 @@ export function buildCreatePoolCallOperation(
   factory: Contract,
   params: CreatePoolParamsValidated,
   tokenContractIds: { xlmContractId: string; usdcContractId: string },
-): AnyOperation {
+): SorobanOperation {
   const amountBigInt = BigInt(Math.floor(params.stakeAmount * 10_000_000));
   const currencyContractId =
     params.currency === "USDC"
@@ -71,7 +69,7 @@ export function buildStakeCallOperation(
   stakingContract: Contract,
   amountStroops: bigint,
   stakerPublicKey: string,
-): AnyOperation {
+): SorobanOperation {
   return stakingContract.call(
     "stake",
     encodeAddress(stakerPublicKey),
@@ -83,7 +81,7 @@ export function buildUnstakeCallOperation(
   stakingContract: Contract,
   sharesStroops: bigint,
   stakerPublicKey: string,
-): AnyOperation {
+): SorobanOperation {
   return stakingContract.call(
     "unstake",
     encodeAddress(stakerPublicKey),
@@ -91,7 +89,7 @@ export function buildUnstakeCallOperation(
   );
 }
 
-export function buildJoinCallOperation(poolContract: Contract): AnyOperation {
+export function buildJoinCallOperation(poolContract: Contract): SorobanOperation {
   return poolContract.call("join");
 }
 
@@ -99,7 +97,7 @@ export function buildSubmitChoiceCallOperation(
   poolContract: Contract,
   roundNumber: number,
   choice: "Heads" | "Tails",
-): AnyOperation {
+): SorobanOperation {
   return poolContract.call(
     "submit_choice",
     encodeRound(roundNumber),
@@ -107,20 +105,20 @@ export function buildSubmitChoiceCallOperation(
   );
 }
 
-export function buildClaimCallOperation(poolContract: Contract): AnyOperation {
+export function buildClaimCallOperation(poolContract: Contract): SorobanOperation {
   return poolContract.call("claim");
 }
 
 export function buildGetArenaStateCallOperation(
   arenaContract: Contract,
-): AnyOperation {
+): SorobanOperation {
   return arenaContract.call("get_arena_state");
 }
 
 export function buildGetUserStateCallOperation(
   arenaContract: Contract,
   userPublicKey: string,
-): AnyOperation {
+): SorobanOperation {
   return arenaContract.call(
     "get_user_state",
     encodeAddress(userPublicKey),
@@ -130,7 +128,7 @@ export function buildGetUserStateCallOperation(
 export function buildGetFullStateCallOperation(
   arenaContract: Contract,
   userPublicKey: string,
-): AnyOperation {
+): SorobanOperation {
   return arenaContract.call(
     "get_full_state",
     encodeAddress(userPublicKey),

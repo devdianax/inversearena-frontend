@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { StellarPublicKeySchema } from "../../shared-d/utils/security-validation";
+import { StellarPublicKeySchema } from "@/shared-d/utils/security-validation";
 
 export const CreatePoolBodySchema = z.object({
   name: z.preprocess(
