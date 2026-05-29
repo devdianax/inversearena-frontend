@@ -2,6 +2,25 @@
 
 This folder contains the Soroban payout execution layer for winner distributions.
 
+## Security
+
+### HTTP Security Headers
+
+The backend API is configured with comprehensive security headers via Helmet:
+
+- **HSTS (Strict-Transport-Security)**: Forces HTTPS for 1 year, including subdomains and preload
+- **Referrer-Policy**: Set to `strict-origin-when-cross-origin` for privacy and analytics balance
+- **Cross-Origin-Opener-Policy**: Set to `same-origin` for improved isolation
+- **Cross-Origin-Resource-Policy**: Set to `cross-origin` to allow frontend resource loading
+- **X-Frame-Options**: Prevents clickjacking attacks
+- **X-Content-Type-Options**: Prevents MIME-sniffing
+- **X-DNS-Prefetch-Control**: Controls DNS prefetching
+- **X-Permitted-Cross-Domain-Policies**: Disables Adobe Flash/PDF cross-domain policies
+
+Content Security Policy (CSP) is disabled in the backend as it's handled by the Next.js frontend.
+
+---
+
 ## Feature flags and env
 
 Set these values in deployment secrets (never commit private keys):
