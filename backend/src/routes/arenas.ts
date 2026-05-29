@@ -10,6 +10,7 @@ import { ArenaService } from "../services/arenaService";
 import { ArenaStatsService } from "../services/arenaStatsService";
 import { RoundRepository } from "../repositories/roundRepository";
 import { apiError } from "../utils/apiError";
+import type { ArenaParticipant } from "../types/arena";
 
 const PaginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
@@ -62,6 +63,11 @@ function formatRound(round: {
   };
 }
 
+const ParticipantsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(12),
+  cursor: z.coerce.number().int().min(0).default(0),
+});
+
 function writeSseEvent(
   res: { write: (chunk: string) => void },
   event: string,
@@ -69,6 +75,45 @@ function writeSseEvent(
 ): void {
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function normalizeRoundMetadata(metadata: unknown): {
+  playerChoices?: Array<{ userId: string; choice: "heads" | "tails"; stake: number }>;
+} {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return {};
+  }
+
+  const value = metadata as Record<string, unknown>;
+  const choices = Array.isArray(value.playerChoices) ? value.playerChoices : [];
+
+  return {
+    playerChoices: choices
+      .map((choice) => {
+        if (!choice || typeof choice !== "object" || Array.isArray(choice)) {
+          return null;
+        }
+
+        const item = choice as Record<string, unknown>;
+        const userId = typeof item.userId === "string" ? item.userId : null;
+        const roundChoice =
+          item.choice === "heads" || item.choice === "tails"
+            ? item.choice
+            : null;
+        const stake = typeof item.stake === "number" ? item.stake : null;
+
+        if (!userId || !roundChoice || stake === null) {
+          return null;
+        }
+
+        return {
+          userId,
+          choice: roundChoice,
+          stake,
+        };
+      })
+      .filter((choice): choice is { userId: string; choice: "heads" | "tails"; stake: number } => choice !== null),
+  };
 }
 
 export function createArenasRouter(authMiddleware: RequestHandler): Router {
@@ -163,6 +208,83 @@ export function createArenasRouter(authMiddleware: RequestHandler): Router {
         items,
         cursor: result.cursor,
         hasMore: result.hasMore,
+      });
+    }),
+  );
+
+  /**
+   * GET /api/arenas/:id/participants
+   * Returns the current round participant manifest with pagination.
+   */
+  router.get(
+    "/:id/participants",
+    asyncHandler(async (req, res) => {
+      const id = req.params.id!;
+      const { limit, cursor } = ParticipantsQuerySchema.parse(req.query);
+
+      const arena = await prisma.arena.findUnique({
+        where: { id },
+        include: {
+          rounds: {
+            orderBy: { roundNumber: "desc" },
+            take: 1,
+            include: {
+              eliminationLogs: {
+                orderBy: { eliminatedAt: "asc" },
+              },
+            },
+          },
+        },
+      });
+
+      if (!arena) {
+        throw apiError(404, "ARENA_NOT_FOUND", `Arena with ID ${id} not found`);
+      }
+
+      const latestRound = arena.rounds[0] ?? null;
+      const metadata = normalizeRoundMetadata(latestRound?.metadata);
+      const choices = metadata.playerChoices ?? [];
+      const userIds = choices.map((choice) => choice.userId);
+      const users =
+        userIds.length > 0
+          ? await prisma.user.findMany({
+              where: { id: { in: userIds } },
+            })
+          : [];
+
+      const userById = new Map(users.map((user) => [user.id, user]));
+      const eliminatedUsers = new Set(
+        latestRound?.eliminationLogs.map((entry) => entry.userId) ?? [],
+      );
+
+      const participants: ArenaParticipant[] = choices.map((choice, index) => {
+        const user = userById.get(choice.userId);
+        const status: ArenaParticipant["status"] = eliminatedUsers.has(choice.userId)
+          ? "ELIMINATED"
+          : latestRound?.state === "OPEN"
+            ? "READY"
+            : "ACTIVE";
+
+        return {
+          id: `${latestRound?.id ?? id}:${choice.userId}:${index}`,
+          walletAddress: user?.walletAddress ?? choice.userId,
+          choice: choice.choice,
+          stake: choice.stake,
+          status,
+          roundNumber: latestRound?.roundNumber ?? 0,
+          joinedAt: (latestRound?.createdAt ?? arena.createdAt).toISOString(),
+        };
+      });
+
+      const total = participants.length;
+      const items = participants.slice(cursor, cursor + limit);
+
+      res.json({
+        arenaId: id,
+        total,
+        nextCursor: cursor + limit < total ? cursor + limit : null,
+        hasMore: cursor + limit < total,
+        items,
       });
     }),
   );
