@@ -8,13 +8,13 @@ declare global {
   namespace Express {
     interface Request {
       adminId?: string;
-      user?: { id: string; walletAddress: string };
+      user?: { id: string; walletAddress: string; jti: string };
     }
   }
 }
 
 export function requireAuth(authService: AuthService): RequestHandler {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const header = req.headers.authorization ?? "";
       const token = header.startsWith("Bearer ") ? header.slice(7) : "";
@@ -22,8 +22,8 @@ export function requireAuth(authService: AuthService): RequestHandler {
         next(apiError(401, "UNAUTHORIZED", "Unauthorized"));
         return;
       }
-      const payload = authService.verifyAccessToken(token);
-      req.user = { id: payload.sub, walletAddress: payload.wallet };
+      const payload = await authService.verifyAccessToken(token);
+      req.user = { id: payload.sub, walletAddress: payload.wallet, jti: payload.jti };
       next();
     } catch (err) {
       next(err);
