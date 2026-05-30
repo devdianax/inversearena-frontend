@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::types::{
     ArenaConfig, ArenaError, Choice, PendingAdmin, PlayerState, RoundResult, YieldSnapshot,
 };
