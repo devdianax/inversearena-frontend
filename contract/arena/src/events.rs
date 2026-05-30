@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, symbol_short};
+use soroban_sdk::{Address, Env, Symbol, symbol_short};
 
 pub struct ArenaEvents;
 
@@ -47,7 +47,13 @@ impl ArenaEvents {
         );
     }
 
-    pub fn vault_balance_decreased(env: &Env, previous_balance: i128, new_balance: i128) {
-        env.events().publish((symbol_short!("vault_decrease"),), (previous_balance, new_balance));
+    pub fn paused(env: &Env, caller: &Address, reason: &Symbol) {
+        env.events()
+            .publish((symbol_short!("paused"), caller.clone()), reason.clone());
+    }
+
+    pub fn unpaused(env: &Env, caller: &Address) {
+        env.events()
+            .publish((symbol_short!("unpaused"), caller.clone()), ());
     }
 }

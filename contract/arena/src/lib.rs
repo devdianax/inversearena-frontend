@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{Address, Bytes, BytesN, Env, Vec, contract, contractimpl, token};
+use soroban_sdk::{Address, Bytes, BytesN, Env, Symbol, Vec, contract, contractimpl, token};
 
 mod eliminations;
 mod events;
@@ -13,12 +13,21 @@ mod types;
 use events::ArenaEvents;
 use rwa_adapter::RwaAdapterClient;
 use storage::ArenaStorage;
-use types::{ArenaConfig, ArenaError, Choice, GameState, PendingAdmin, PlayerState, RoundResult, YieldSnapshot};
+use types::{
+    ArenaConfig, ArenaError, Choice, GameState, PendingAdmin, PlayerState, RoundResult,
+    YieldSnapshot,
+};
 
 const PAGE_SIZE: u32 = 50;
 
 #[contract]
 pub struct ArenaContract;
+
+struct RoundResolution {
+    eliminated: u32,
+    survivors: u32,
+    winner: Option<Address>,
+}
 
 #[contractimpl]
 impl ArenaContract {
@@ -50,7 +59,9 @@ impl ArenaContract {
             yield_vault,
             entry_fee,
             state: GameState::Open,
+            paused: false,
             player_count: 0,
+            cumulative_yield: 0,
             commit_deadline: 0,
             round_count: 0,
             oracle_contract,
@@ -64,6 +75,7 @@ impl ArenaContract {
     pub fn join_arena(env: Env, player: Address) -> Result<(), ArenaError> {
         player.require_auth();
         let config = ArenaStorage::load_config(&env)?;
+        Self::require_not_paused(&config)?;
         if config.state != GameState::Open {
             return Err(ArenaError::CannotCancelStartedGame);
         }
@@ -89,6 +101,8 @@ impl ArenaContract {
         commitment: BytesN<32>,
     ) -> Result<(), ArenaError> {
         player.require_auth();
+        let config = ArenaStorage::load_config(&env)?;
+        Self::require_not_paused(&config)?;
         ArenaStorage::save_commitment(&env, &player, &commitment);
         Ok(())
     }
@@ -100,10 +114,12 @@ impl ArenaContract {
         salt: BytesN<32>,
     ) -> Result<(), ArenaError> {
         player.require_auth();
+        let config = ArenaStorage::load_config(&env)?;
+        Self::require_not_paused(&config)?;
         if ArenaStorage::load_choice(&env, &player).is_some() {
             return Err(ArenaError::ChoiceAlreadyRevealed);
         }
-        if env.ledger().timestamp() < ArenaStorage::load_config(&env)?.commit_deadline {
+        if env.ledger().timestamp() < config.commit_deadline {
             return Err(ArenaError::RoundNotActive);
         }
 
@@ -119,6 +135,7 @@ impl ArenaContract {
     pub fn cancel_arena(env: Env) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
+        Self::require_not_paused(&config)?;
         state_machine::ensure_state(
             &config.state,
             &GameState::Open,
@@ -167,6 +184,7 @@ impl ArenaContract {
     pub fn start_round(env: Env, duration_seconds: u64) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
+        Self::require_not_paused(&config)?;
 
         if config.state != GameState::Open && config.state != GameState::Finished {
             return Err(ArenaError::CannotCancelStartedGame);
@@ -184,6 +202,7 @@ impl ArenaContract {
     pub fn resolve_round(env: Env) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
+        Self::require_not_paused(&config)?;
 
         if config.state != GameState::Active {
             return Err(ArenaError::RoundNotActive);
@@ -221,26 +240,27 @@ impl ArenaContract {
         ArenaStorage::save_round_yield_bps(&env, round, yield_bps);
         ArenaStorage::save_yield_snapshot(&env, round, &snapshot);
         ArenaStorage::save_last_vault_balance(&env, vault_balance);
+        config.cumulative_yield = config.cumulative_yield.saturating_add(accrued);
 
-        let (eliminated, survivors, winner) = Self::resolve_players(&env, round);
+        let resolution = Self::resolve_players(&env, round);
         let result = RoundResult {
             round,
-            eliminated,
-            survivors,
+            eliminated: resolution.eliminated,
+            survivors: resolution.survivors,
             yield_snapshot: snapshot,
         };
         ArenaStorage::save_round_result(&env, round, &result);
 
         config.round_count = round;
-        config.state = if survivors <= 1 {
+        config.state = if resolution.survivors <= 1 {
             GameState::Finished
         } else {
             GameState::Open
         };
         ArenaStorage::save_config(&env, &config);
 
-        ArenaEvents::round_resolved(&env, round, eliminated, survivors);
-        if let Some(winner_addr) = winner {
+        ArenaEvents::round_resolved(&env, round, resolution.eliminated, resolution.survivors);
+        if let Some(winner_addr) = resolution.winner {
             ArenaEvents::game_finished(&env, &winner_addr, round);
         }
         Ok(())
@@ -249,6 +269,7 @@ impl ArenaContract {
     pub fn claim(env: Env, winner: Address) -> Result<(), ArenaError> {
         winner.require_auth();
         let mut config = ArenaStorage::load_config(&env)?;
+        Self::require_not_paused(&config)?;
 
         // CHECKS — validate caller and arena state before doing anything else.
         if config.state != GameState::Finished {
@@ -297,16 +318,17 @@ impl ArenaContract {
     pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ArenaError> {
         let config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
+        Self::require_not_paused(&config)?;
         ArenaStorage::save_pending_admin(&env, &PendingAdmin { new_admin });
         Ok(())
     }
 
     /// Accept a pending admin transfer. Only the proposed new admin can call this.
     pub fn accept_admin(env: Env) -> Result<(), ArenaError> {
-        let pending = ArenaStorage::load_pending_admin(&env)
-            .ok_or(ArenaError::NoPendingAdmin)?;
+        let pending = ArenaStorage::load_pending_admin(&env).ok_or(ArenaError::NoPendingAdmin)?;
         pending.new_admin.require_auth();
         let mut config = ArenaStorage::load_config(&env)?;
+        Self::require_not_paused(&config)?;
         let old_admin = config.admin.clone();
         config.admin = pending.new_admin;
         ArenaStorage::save_config(&env, &config);
@@ -315,35 +337,42 @@ impl ArenaContract {
         Ok(())
     }
 
-    /// Immediate single-step admin transfer (deprecated — use propose_admin /
-    /// accept_admin instead). Kept for backward compatibility.
+    /// Backward-compatible alias for staging an admin transfer. The proposed
+    /// admin must still call `accept_admin` before control changes hands.
     pub fn change_admin(env: Env, new_admin: Address) -> Result<(), ArenaError> {
+        Self::propose_admin(env, new_admin)
+    }
+
+    pub fn pause(env: Env, reason: Symbol) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
-        let old_admin = config.admin.clone();
-        config.admin = new_admin.clone();
+        config.paused = true;
         ArenaStorage::save_config(&env, &config);
-        ArenaEvents::admin_changed(&env, &old_admin, &new_admin);
+        ArenaEvents::paused(&env, &config.admin, &reason);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), ArenaError> {
+        let mut config = ArenaStorage::load_config(&env)?;
+        config.admin.require_auth();
+        config.paused = false;
+        ArenaStorage::save_config(&env, &config);
+        ArenaEvents::unpaused(&env, &config.admin);
         Ok(())
     }
 
     pub fn get_total_yield(env: Env) -> i128 {
-        let round_count = ArenaStorage::load_config(&env)
-            .map(|c| c.round_count)
-            .unwrap_or(0);
-        let mut total = 0i128;
-        let mut round = 1u32;
-        while round <= round_count {
-            if let Some(snapshot) = ArenaStorage::load_yield_snapshot(&env, round) {
-                total = total.saturating_add(snapshot.accrued);
-            }
-            round += 1;
-        }
-        total
+        ArenaStorage::load_config(&env)
+            .map(|c| c.cumulative_yield)
+            .unwrap_or(0)
     }
 
     pub fn get_yield_snapshot(env: Env, round: u32) -> Option<YieldSnapshot> {
         ArenaStorage::load_yield_snapshot(&env, round)
+    }
+
+    pub fn get_round_result(env: Env, round: u32) -> Option<RoundResult> {
+        ArenaStorage::load_round_result(&env, round)
     }
 
     fn compute_commitment(env: &Env, choice: Choice, salt: &BytesN<32>) -> BytesN<32> {
@@ -356,7 +385,14 @@ impl ArenaContract {
         env.crypto().sha256(&preimage).into()
     }
 
-    fn resolve_players(env: &Env, round: u32) -> (u32, u32, Option<Address>) {
+    fn require_not_paused(config: &ArenaConfig) -> Result<(), ArenaError> {
+        if config.paused {
+            return Err(ArenaError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    fn resolve_players(env: &Env, round: u32) -> RoundResolution {
         let players = ArenaStorage::load_all_players(env);
         let mut active_choices: Vec<Choice> = Vec::new(env);
         for player in players.iter() {
@@ -396,9 +432,17 @@ impl ArenaContract {
         }
 
         if survivors == 1 {
-            (eliminated, survivors, winner)
+            RoundResolution {
+                eliminated,
+                survivors,
+                winner,
+            }
         } else {
-            (eliminated, survivors, None)
+            RoundResolution {
+                eliminated,
+                survivors,
+                winner: None,
+            }
         }
     }
 }
@@ -407,7 +451,7 @@ impl ArenaContract {
 mod test {
     use super::*;
     use soroban_sdk::{
-        contract, contractimpl,
+        contract, contractimpl, symbol_short,
         testutils::{Address as _, Events as _, Ledger as _},
     };
 
@@ -452,7 +496,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: u64::MAX,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -530,7 +576,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -564,7 +612,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -594,7 +644,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 1,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -625,7 +677,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -655,7 +709,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -680,7 +736,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -698,6 +756,107 @@ mod test {
         env.as_contract(&client.address, || {
             ArenaStorage::load_config(env).unwrap().state
         })
+    }
+
+    fn paused_error<T>(
+        result: Result<
+            Result<T, soroban_sdk::ConversionError>,
+            Result<ArenaError, soroban_sdk::InvokeError>,
+        >,
+    ) -> ArenaError {
+        result
+            .err()
+            .expect("paused call must error")
+            .expect("error must be a contract error")
+    }
+
+    #[test]
+    fn pause_rejects_mutating_gameplay_entry_points() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(ArenaContract, ());
+        let admin = Address::generate(&env);
+        let player = Address::generate(&env);
+        let salt = BytesN::from_array(&env, &[1u8; 32]);
+        let commitment = compute_commitment(&env, Choice::Heads, &salt);
+
+        env.as_contract(&contract_id, || {
+            ArenaStorage::save_config(
+                &env,
+                &ArenaConfig {
+                    admin: admin.clone(),
+                    stake_token: Address::generate(&env),
+                    entry_fee: 100,
+                    state: GameState::Active,
+                    paused: false,
+                    player_count: 1,
+                    commit_deadline: 0,
+                    yield_vault: Address::generate(&env),
+                    round_count: 0,
+                    oracle_contract: Address::generate(&env),
+                },
+            );
+            ArenaStorage::save_player(
+                &env,
+                &player,
+                &PlayerState {
+                    active: true,
+                    rounds_survived: 0,
+                },
+            );
+            ArenaStorage::save_commitment(&env, &player, &commitment);
+            ArenaStorage::save_round_start(&env, 0);
+            ArenaStorage::save_round_duration(&env, 0);
+        });
+
+        let client = ArenaContractClient::new(&env, &contract_id);
+        client.pause(&symbol_short!("emerg"));
+
+        assert_eq!(
+            paused_error(client.try_join_arena(&player)),
+            ArenaError::ContractPaused
+        );
+        assert_eq!(
+            paused_error(client.try_submit_commitment(&player, &commitment)),
+            ArenaError::ContractPaused
+        );
+        assert_eq!(
+            paused_error(client.try_reveal_choice(&player, &Choice::Heads, &salt)),
+            ArenaError::ContractPaused
+        );
+        assert_eq!(
+            paused_error(client.try_resolve_round()),
+            ArenaError::ContractPaused
+        );
+
+        env.as_contract(&contract_id, || {
+            let mut config = ArenaStorage::load_config(&env).unwrap();
+            config.state = GameState::Finished;
+            ArenaStorage::save_config(&env, &config);
+        });
+        assert_eq!(
+            paused_error(client.try_claim(&player)),
+            ArenaError::ContractPaused
+        );
+    }
+
+    #[test]
+    fn unpause_allows_mutating_gameplay_again() {
+        let (env, client) = setup(0);
+        let player = Address::generate(&env);
+        let commitment = BytesN::from_array(&env, &[2u8; 32]);
+
+        client.pause(&symbol_short!("emerg"));
+        client.unpause();
+        client.submit_commitment(&player, &commitment);
+
+        env.as_contract(&client.address, || {
+            assert_eq!(
+                ArenaStorage::load_commitment(&env, &player).unwrap(),
+                commitment
+            );
+            assert!(!ArenaStorage::load_config(&env).unwrap().paused);
+        });
     }
 
     #[test]
@@ -727,7 +886,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -765,6 +926,7 @@ mod test {
         env.as_contract(&client.address, || {
             let mut config = ArenaStorage::load_config(&env).unwrap();
             config.round_count = 3;
+            config.cumulative_yield = 60;
             ArenaStorage::save_config(&env, &config);
             for round in 1..=3 {
                 ArenaStorage::save_yield_snapshot(
@@ -798,7 +960,9 @@ mod test {
                     stake_token: Address::generate(&env),
                     entry_fee: 100,
                     state: GameState::Open,
+                    paused: false,
                     player_count: 1,
+                    cumulative_yield: 0,
                     commit_deadline: 0,
                     yield_vault: vault_id.clone(),
                     round_count: 0,
@@ -850,7 +1014,9 @@ mod test {
                     stake_token: Address::generate(&env),
                     entry_fee: 100,
                     state: GameState::Finished,
+                    paused: false,
                     player_count: 1,
+                    cumulative_yield: 0,
                     commit_deadline: 0,
                     yield_vault: Address::generate(&env),
                     round_count: 0,
@@ -897,7 +1063,9 @@ mod test {
                     stake_token: Address::generate(&env),
                     entry_fee: 100,
                     state: GameState::Finished,
+                    paused: false,
                     player_count: 1,
+                    cumulative_yield: 0,
                     commit_deadline: 0,
                     yield_vault: Address::generate(&env),
                     round_count: 0,
@@ -937,7 +1105,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -969,7 +1139,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,
@@ -1001,7 +1173,9 @@ mod test {
                 stake_token: Address::generate(&env),
                 entry_fee: 100,
                 state: GameState::Open,
+                paused: false,
                 player_count: 0,
+                cumulative_yield: 0,
                 commit_deadline: 0,
                 yield_vault: Address::generate(&env),
                 round_count: 0,

@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use soroban_sdk::{Address, contracterror, contracttype};
 
 /// Lifecycle state of an arena.
@@ -45,9 +44,14 @@ pub struct ArenaConfig {
     pub yield_vault: Address,
     pub entry_fee: i128,
     pub state: GameState,
+    /// Emergency circuit breaker. When true, state-mutating gameplay entry
+    /// points reject until the admin unpauses the arena.
+    pub paused: bool,
     /// Total number of players that have ever joined this arena. Kept in sync
     /// by `ArenaStorage::add_player` so it can be read without scanning storage.
     pub player_count: u32,
+    /// Cumulative yield accrued across all resolved rounds.
+    pub cumulative_yield: i128,
     /// Ledger timestamp (seconds) after which commitments are no longer
     /// accepted and the reveal phase begins.
     pub commit_deadline: u64,
@@ -136,4 +140,6 @@ pub enum ArenaError {
     /// No pending admin transfer to accept.
     NoPendingAdmin = 14,
     InvalidVaultAddress = 15,
+    /// Contract is paused by the admin.
+    ContractPaused = 15,
 }
