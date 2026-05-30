@@ -8,6 +8,7 @@ import { prisma } from "../db/prisma";
 import type { CreateArenaInput } from "../types/arena";
 import { ArenaService } from "../services/arenaService";
 import { ArenaStatsService } from "../services/arenaStatsService";
+import { ArenaController } from "../controllers/arena.controller";
 import { RoundRepository } from "../repositories/roundRepository";
 import { apiError } from "../utils/apiError";
 import type { ArenaParticipant } from "../types/arena";
@@ -121,6 +122,7 @@ export function createArenasRouter(authMiddleware: RequestHandler): Router {
   const arenaService = new ArenaService(prisma);
   const arenaStatsService = new ArenaStatsService(prisma);
   const roundRepository = new RoundRepository(prisma);
+  const arenaController = new ArenaController(prisma);
 
   /**
    * POST /api/arenas

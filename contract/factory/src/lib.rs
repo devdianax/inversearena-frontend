@@ -4,8 +4,7 @@ mod snapshot_tests;
 mod storage;
 mod types;
 
-use storage::FactoryStorage;
-use types::FactoryError;
+use soroban_sdk::{contract, contractimpl};
 
 /// Factory contract — deploys arena instances and enforces protocol-level rules.
 ///
@@ -14,7 +13,4 @@ use types::FactoryError;
 pub struct FactoryContract;
 
 #[contractimpl]
-impl FactoryContract {
-
-    }
-}
+impl FactoryContract {}

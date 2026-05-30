@@ -40,7 +40,11 @@ export class ArenaController {
    *  }
    */
   getParticipants = async (req: Request, res: Response): Promise<void> => {
-    const { id: arenaId } = req.params;
+    const arenaId = req.params.id;
+    if (!arenaId) {
+      res.status(400).json({ error: "Arena ID is required" });
+      return;
+    }
     const { limit, cursor } = ParticipantsQuerySchema.parse(req.query);
 
     // Verify arena exists
@@ -99,7 +103,7 @@ export class ArenaController {
     }
 
     // Extract participants from the first round's metadata
-    const firstRound = rounds[0];
+    const firstRound = rounds[0]!;
     const metadata = (firstRound.metadata as Record<string, unknown>) || {};
     const playerChoices = (metadata.playerChoices as Array<{ userId: string; stake?: number }>) || [];
 

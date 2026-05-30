@@ -1,7 +1,8 @@
 #[cfg(test)]
 mod snapshot_tests {
-    use crate::types::{ArenaConfig, Choice, GameState, PendingAdmin, PlayerState, YieldSnapshot};
-    use soroban_sdk::{Address, Env, TryFromVal, TryIntoVal};
+    use crate::types::{
+        ArenaConfig, Choice, GameState, PendingAdmin, PlayerState, RoundResult, YieldSnapshot,
+    };
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::xdr::{ScVal, ToXdr};
     use soroban_sdk::{Address, Env, TryFromVal, TryIntoVal};
@@ -24,10 +25,6 @@ mod snapshot_tests {
         assert!(tails.len() > 0);
         // Variant order must be stable — reordering would change discriminants.
         assert_ne!(heads, tails);
-
-        // To capture the actual byte arrays for a hard-coded snapshot, run:
-        //   cargo test snapshot_choice -- --nocapture
-        // and record the printed XDR in place of these structural assertions.
     }
 
     /// PlayerState is stored per-player in persistent storage. Adding, removing,
@@ -36,27 +33,34 @@ mod snapshot_tests {
     #[test]
     fn snapshot_player_state() {
         let env = Env::default();
-        let active = to_xdr(&env, PlayerState { active: true, rounds_survived: 5 });
-        let inactive = to_xdr(&env, PlayerState { active: false, rounds_survived: 0 });
+        let active = to_xdr(
+            &env,
+            PlayerState {
+                active: true,
+                rounds_survived: 5,
+            },
+        );
+        let inactive = to_xdr(
+            &env,
+            PlayerState {
+                active: false,
+                rounds_survived: 0,
+            },
+        );
 
         assert!(active.len() > 0);
         // Different field values must produce different XDR.
         assert_ne!(active, inactive);
 
         // Changing rounds_survived alone must also change the XDR.
-        let more_rounds = to_xdr(&env, PlayerState { active: true, rounds_survived: 6 });
-        assert_ne!(active, more_rounds);
-        assert!(
-            to_xdr(
-                &env,
-                PlayerState {
-                    active: true,
-                    rounds_survived: 5
-                }
-            )
-            .len()
-                > 0
+        let more_rounds = to_xdr(
+            &env,
+            PlayerState {
+                active: true,
+                rounds_survived: 6,
+            },
         );
+        assert_ne!(active, more_rounds);
     }
 
     /// ArenaConfig is stored in persistent storage at arena initialisation.
@@ -65,13 +69,9 @@ mod snapshot_tests {
     #[test]
     fn snapshot_arena_config() {
         let env = Env::default();
-        let config = ArenaConfig {
+        let config_a = ArenaConfig {
             admin: Address::generate(&env),
             stake_token: Address::generate(&env),
-            entry_fee: 100,
-            state: GameState::Open,
-            player_count: 42,
-            commit_deadline: 1730000000,
             yield_vault: Address::generate(&env),
             entry_fee: 100,
             state: GameState::Open,
@@ -84,7 +84,7 @@ mod snapshot_tests {
             admin: Address::generate(&env),
             stake_token: Address::generate(&env),
             yield_vault: Address::generate(&env),
-            entry_fee: 200,  // differs from config_a
+            entry_fee: 200, // differs from config_a
             state: GameState::Open,
             player_count: 42,
             commit_deadline: 1_730_000_000,
@@ -102,33 +102,6 @@ mod snapshot_tests {
     /// changes their XDR discriminants and would flip the stored state of every
     /// live arena (e.g. Open ↔ Active would swap after reorder).
     #[test]
-    fn snapshot_yield_snapshot() {
-        let env = Env::default();
-        let snapshot = YieldSnapshot {
-            round: 3,
-            rate_bps: 500,
-            accrued: 123,
-        };
-        assert!(to_xdr(&env, snapshot).len() > 0);
-    }
-
-    #[test]
-    fn snapshot_round_result() {
-        let env = Env::default();
-        let result = RoundResult {
-            round: 3,
-            eliminated: 2,
-            survivors: 1,
-            yield_snapshot: YieldSnapshot {
-                round: 3,
-                rate_bps: 500,
-                accrued: 123,
-            },
-        };
-        assert!(to_xdr(&env, result).len() > 0);
-    }
-
-    #[test]
     fn snapshot_game_state() {
         let env = Env::default();
         let open = to_xdr(&env, GameState::Open);
@@ -140,13 +113,6 @@ mod snapshot_tests {
         // All variants must serialise to non-empty XDR.
         for xdr in [&open, &active, &finished, &cancelled, &settled] {
             assert!(xdr.len() > 0);
-        for state in [
-            GameState::Open,
-            GameState::Active,
-            GameState::Finished,
-            GameState::Cancelled,
-        ] {
-            assert!(to_xdr(&env, state).len() > 0);
         }
         // Every variant pair must be distinct (no discriminant collision).
         assert_ne!(open, active);
@@ -162,27 +128,54 @@ mod snapshot_tests {
     #[test]
     fn snapshot_yield_snapshot() {
         let env = Env::default();
-        let snap_a = to_xdr(&env, YieldSnapshot {
-            round: 1,
-            total_deposited: 1_000_000,
-            total_yield: 5_000,
-        });
-        let snap_b = to_xdr(&env, YieldSnapshot {
-            round: 2,  // differs from snap_a
-            total_deposited: 1_000_000,
-            total_yield: 5_000,
-        });
-        let snap_c = to_xdr(&env, YieldSnapshot {
-            round: 1,
-            total_deposited: 1_000_000,
-            total_yield: 10_000,  // differs from snap_a
-        });
+        let snap_a = to_xdr(
+            &env,
+            YieldSnapshot {
+                round: 1,
+                rate_bps: 500,
+                accrued: 5_000,
+            },
+        );
+        let snap_b = to_xdr(
+            &env,
+            YieldSnapshot {
+                round: 2, // differs from snap_a
+                rate_bps: 500,
+                accrued: 5_000,
+            },
+        );
+        let snap_c = to_xdr(
+            &env,
+            YieldSnapshot {
+                round: 1,
+                rate_bps: 500,
+                accrued: 10_000, // differs from snap_a
+            },
+        );
 
         assert!(snap_a.len() > 0);
         // Different round numbers must produce different XDR.
         assert_ne!(snap_a, snap_b);
-        // Different total_yield must produce different XDR.
+        // Different accrued yield must produce different XDR.
         assert_ne!(snap_a, snap_c);
+    }
+
+    /// RoundResult stores per-round resolution metadata. Field changes break
+    /// deserialisation of historical round records stored on-chain.
+    #[test]
+    fn snapshot_round_result() {
+        let env = Env::default();
+        let result = RoundResult {
+            round: 3,
+            eliminated: 2,
+            survivors: 1,
+            yield_snapshot: YieldSnapshot {
+                round: 3,
+                rate_bps: 500,
+                accrued: 123,
+            },
+        };
+        assert!(to_xdr(&env, result).len() > 0);
     }
 
     /// PendingAdmin stores a pending admin-transfer proposal. A discriminant

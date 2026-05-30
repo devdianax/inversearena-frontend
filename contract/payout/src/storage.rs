@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use crate::types::PayoutError;
-use soroban_sdk::{contracttype, symbol_short, Address, Env};
+use soroban_sdk::{Address, Env, contracttype, symbol_short};
 
 /// Persistent record that a given payout id has been executed, enabling
 /// idempotent distribution and off-chain reconciliation.

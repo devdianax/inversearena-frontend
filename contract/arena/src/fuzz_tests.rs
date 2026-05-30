@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod fuzz_tests {
-    use crate::eliminations::{is_eliminated, surviving_choice, tally_choices, Tally};
+    use crate::eliminations::{Tally, is_eliminated, surviving_choice, tally_choices};
     use crate::types::Choice;
     use proptest::prelude::*;
     use soroban_sdk::{Env, Vec};

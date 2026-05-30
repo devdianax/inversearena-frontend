@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, Address, Env};
+use soroban_sdk::{Address, Env, contract, contractimpl};
 
 /// On-chain yield rate oracle for InverseArena.
 ///
@@ -21,8 +21,12 @@ impl OracleContract {
     /// Initialise the oracle with an admin and an initial yield rate.
     pub fn initialize(env: Env, admin: Address, initial_rate_bps: u32) {
         admin.require_auth();
-        env.storage().persistent().set(&soroban_sdk::symbol_short!("ADMIN"), &admin);
-        env.storage().persistent().set(&soroban_sdk::symbol_short!("RATE"), &initial_rate_bps);
+        env.storage()
+            .persistent()
+            .set(&soroban_sdk::symbol_short!("ADMIN"), &admin);
+        env.storage()
+            .persistent()
+            .set(&soroban_sdk::symbol_short!("RATE"), &initial_rate_bps);
     }
 
     /// Update the current yield rate. Only callable by the admin.
@@ -33,8 +37,11 @@ impl OracleContract {
             .get(&soroban_sdk::symbol_short!("ADMIN"))
             .unwrap_or_else(|| panic!("not initialised"));
         admin.require_auth();
-        env.storage().persistent().set(&soroban_sdk::symbol_short!("RATE"), &rate_bps);
-        env.events().publish((soroban_sdk::symbol_short!("rate_set"),), rate_bps);
+        env.storage()
+            .persistent()
+            .set(&soroban_sdk::symbol_short!("RATE"), &rate_bps);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("rate_set"),), rate_bps);
     }
 
     /// Return the current yield rate in basis points (e.g. 500 = 5.00 % APY).

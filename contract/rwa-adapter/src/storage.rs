@@ -19,7 +19,9 @@ impl RwaStorage {
     }
 
     pub fn set_initialized(env: &Env) {
-        env.storage().persistent().set(&symbol_short!("RWAINIT"), &true);
+        env.storage()
+            .persistent()
+            .set(&symbol_short!("RWAINIT"), &true);
     }
 
     pub fn load_config(env: &Env) -> Result<RwaConfig, RwaError> {
@@ -30,7 +32,9 @@ impl RwaStorage {
     }
 
     pub fn save_config(env: &Env, config: &RwaConfig) {
-        env.storage().persistent().set(&symbol_short!("RWACONFIG"), config);
+        env.storage()
+            .persistent()
+            .set(&symbol_short!("RWACONFIG"), config);
     }
 
     pub fn load_position(env: &Env, user: &Address) -> YieldAccrual {

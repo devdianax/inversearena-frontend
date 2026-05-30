@@ -323,10 +323,10 @@ impl ArenaContract {
         let mut active_choices: Vec<Choice> = Vec::new(env);
         for player in players.iter() {
             let state = ArenaStorage::load_player(env, &player).unwrap_or_default();
-            if state.active {
-                if let Some(choice) = ArenaStorage::load_choice(env, &player) {
-                    active_choices.push_back(choice);
-                }
+            if state.active
+                && let Some(choice) = ArenaStorage::load_choice(env, &player)
+            {
+                active_choices.push_back(choice);
             }
         }
 

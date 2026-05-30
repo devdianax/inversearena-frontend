@@ -3,7 +3,7 @@ mod snapshot_tests;
 mod storage;
 mod types;
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Vec};
+use soroban_sdk::{Address, Env, Vec, contract, contractimpl, symbol_short, token};
 use storage::PayoutStorage;
 use types::PayoutError;
 

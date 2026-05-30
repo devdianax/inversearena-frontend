@@ -44,7 +44,11 @@ impl RwaAdapter {
         RwaStorage::save_config(&env, &cfg);
 
         env.events().publish(
-            (soroban_sdk::symbol_short!("deposited"), from.clone(), amount),
+            (
+                soroban_sdk::symbol_short!("deposited"),
+                from.clone(),
+                amount,
+            ),
             (),
         );
         Ok(())

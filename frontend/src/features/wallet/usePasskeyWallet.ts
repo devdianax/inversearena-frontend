@@ -95,7 +95,7 @@ export function usePasskeyWallet() {
     if (!state.keyId) throw new Error('No passkey registered. Call register() first.');
     if (!isAvailable()) throw new Error('WebAuthn is not available.');
 
-    const challenge = new TextEncoder().encode(txXdr);
+    const challenge = new TextEncoder().encode(txXdr).buffer as ArrayBuffer;
 
     const assertion = await navigator.credentials.get({
       publicKey: {

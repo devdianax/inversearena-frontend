@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod snapshot_tests {
     use crate::storage::DataKey;
-    use soroban_sdk::{Env, TryFromVal, TryIntoVal};
     use soroban_sdk::xdr::{ScVal, ToXdr};
+    use soroban_sdk::{Env, TryFromVal, TryIntoVal};
 
     fn to_xdr<T: TryIntoVal<Env, soroban_sdk::Val>>(env: &Env, val: T) -> soroban_sdk::Bytes {
         let v = val.try_into_val(env).expect("Val");

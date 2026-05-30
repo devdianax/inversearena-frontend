@@ -2,8 +2,8 @@
 mod snapshot_tests {
     use crate::storage::{CreatorStakeRecord, DataKey};
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{Address, Env, TryFromVal, TryIntoVal};
     use soroban_sdk::xdr::{ScVal, ToXdr};
+    use soroban_sdk::{Address, Env, TryFromVal, TryIntoVal};
 
     fn to_xdr<T: TryIntoVal<Env, soroban_sdk::Val>>(env: &Env, val: T) -> soroban_sdk::Bytes {
         let v = val.try_into_val(env).expect("Val");
