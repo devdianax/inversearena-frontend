@@ -135,4 +135,5 @@ pub enum ArenaError {
     PlayerEliminated = 13,
     /// No pending admin transfer to accept.
     NoPendingAdmin = 14,
+    InvalidVaultAddress = 15,
 }

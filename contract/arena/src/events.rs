@@ -46,4 +46,8 @@ impl ArenaEvents {
             (old_admin.clone(), new_admin.clone()),
         );
     }
+
+    pub fn vault_balance_decreased(env: &Env, previous_balance: i128, new_balance: i128) {
+        env.events().publish((symbol_short!("vault_decrease"),), (previous_balance, new_balance));
+    }
 }
