@@ -1,3 +1,7 @@
+//! Arena contract for the InverseArena elimination game.
+//!
+//! Manages the full game lifecycle: player registration, commit-reveal rounds,
+//! yield accounting via an RWA vault adapter, winner payout, and admin controls.
 #![no_std]
 use soroban_sdk::{Address, Bytes, BytesN, Env, Symbol, Vec, contract, contractimpl, token};
 
@@ -21,6 +25,9 @@ use types::{
 const PAGE_SIZE: u32 = 50;
 
 #[contract]
+/// On-chain arena contract. Manages the full lifecycle of a single elimination
+/// game: player registration, commit-reveal rounds, yield accounting, winner
+/// payout, and admin controls.
 pub struct ArenaContract;
 
 struct RoundResolution {
@@ -31,6 +38,23 @@ struct RoundResolution {
 
 #[contractimpl]
 impl ArenaContract {
+    /// Initialise the arena with its immutable configuration.
+    ///
+    /// Must be called exactly once before any other entry point. Sets the arena
+    /// state to `Open`, allowing players to join.
+    ///
+    /// # Parameters
+    /// - `admin`: Address that will control admin-only operations. Must authorize this call.
+    /// - `stake_token`: SAC token address used for entry fees and prize payouts.
+    /// - `yield_vault`: RWA adapter contract that earns yield on the staked principal.
+    /// - `entry_fee`: Exact token amount every player must stake to join.
+    /// - `oracle_contract`: On-chain oracle queried for the current yield rate on each round resolution.
+    ///
+    /// # Errors
+    /// - `ArenaError::AlreadyInitialized` if `initialize` has already been called.
+    ///
+    /// # Events
+    /// Emits `initialized` with the admin address.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -72,6 +96,22 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Join the arena by staking the configured entry fee.
+    ///
+    /// Transfers `entry_fee` tokens from the player to the arena contract and
+    /// forwards them into the yield vault. Joining is only allowed while the
+    /// arena is in the `Open` state.
+    ///
+    /// # Parameters
+    /// - `player`: Address of the joining player. Must authorize this call.
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    /// - `ArenaError::ContractPaused` if the contract is paused.
+    /// - `ArenaError::CannotCancelStartedGame` if the arena is not in the `Open` state.
+    ///
+    /// # Events
+    /// Emits `player_joined` with the player address and updated total player count.
     pub fn join_arena(env: Env, player: Address) -> Result<(), ArenaError> {
         player.require_auth();
         let config = ArenaStorage::load_config(&env)?;
@@ -95,6 +135,19 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Submit a blinded commitment to a coin-flip choice.
+    ///
+    /// The player hashes their choice together with a secret salt and submits
+    /// only the hash. The actual choice is revealed later with `reveal_choice`.
+    /// This prevents other players from front-running the revealed choice.
+    ///
+    /// # Parameters
+    /// - `player`: Address of the committing player. Must authorize this call.
+    /// - `commitment`: SHA-256 hash of `[choice_byte] ++ salt_bytes`.
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    /// - `ArenaError::ContractPaused` if the contract is paused.
     pub fn submit_commitment(
         env: Env,
         player: Address,
@@ -107,6 +160,24 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Reveal the choice committed with `submit_commitment`.
+    ///
+    /// Verifies that `SHA-256([choice_byte] ++ salt_bytes)` matches the stored
+    /// commitment, then records the player's choice for the current round. Can
+    /// only be called after the `commit_deadline` timestamp has passed.
+    ///
+    /// # Parameters
+    /// - `player`: Address of the revealing player. Must authorize this call.
+    /// - `choice`: The coin-flip choice (`Heads` or `Tails`).
+    /// - `salt`: The 32-byte random nonce used when hashing the original commitment.
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    /// - `ArenaError::ContractPaused` if the contract is paused.
+    /// - `ArenaError::ChoiceAlreadyRevealed` if this player has already revealed for the current round.
+    /// - `ArenaError::RoundNotActive` if the `commit_deadline` has not yet elapsed.
+    /// - `ArenaError::MissingCommitment` if no commitment was submitted for this player.
+    /// - `ArenaError::InvalidReveal` if the revealed choice and salt do not match the stored commitment.
     pub fn reveal_choice(
         env: Env,
         player: Address,
@@ -132,6 +203,16 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Cancel the arena and refund all entry fees to players.
+    ///
+    /// Only callable by the admin while the arena is still `Open`. Transitions
+    /// the arena to `Cancelled`, withdraws all principal from the yield vault,
+    /// and transfers each player's `entry_fee` back to their address.
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    /// - `ArenaError::ContractPaused` if the contract is paused.
+    /// - `ArenaError::CannotCancelStartedGame` if the arena is not in the `Open` state.
     pub fn cancel_arena(env: Env) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
@@ -160,6 +241,13 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Return a paginated list of all players and their current state.
+    ///
+    /// Pages are zero-indexed and contain up to 50 entries each. Returns an
+    /// empty list when `page` is out of range.
+    ///
+    /// # Parameters
+    /// - `page`: Zero-based page index.
     pub fn get_players(env: Env, page: u32) -> Vec<(Address, PlayerState)> {
         let all = ArenaStorage::load_all_players(&env);
         let start = (page.saturating_mul(PAGE_SIZE)) as usize;
@@ -175,12 +263,34 @@ impl ArenaContract {
         result
     }
 
+    /// Return the total number of players who have ever joined this arena.
+    ///
+    /// Returns `0` if the contract has not been initialised.
     pub fn player_count(env: Env) -> u32 {
         ArenaStorage::load_config(&env)
             .map(|c| c.player_count)
             .unwrap_or(0)
     }
 
+    /// Start a new commit-reveal round.
+    ///
+    /// Only callable by the admin while the arena is `Open` or `Finished`
+    /// (i.e., between rounds). Transitions the arena to `Active` and records
+    /// the round start timestamp. Players must submit commitments before
+    /// `duration_seconds` elapses, after which reveals are accepted.
+    ///
+    /// # Parameters
+    /// - `duration_seconds`: Length of the commit window in ledger seconds.
+    ///   When this many seconds have passed since the round start, `resolve_round`
+    ///   becomes callable.
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    /// - `ArenaError::ContractPaused` if the contract is paused.
+    /// - `ArenaError::CannotCancelStartedGame` if the arena is not in `Open` or `Finished` state.
+    ///
+    /// # Events
+    /// Emits `game_started` with the round number and duration.
     pub fn start_round(env: Env, duration_seconds: u64) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
@@ -199,6 +309,24 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Resolve the current round by tallying revealed choices and eliminating the majority.
+    ///
+    /// Only callable by the admin after the grace period (`round_start +
+    /// duration_seconds`) has elapsed. Computes which choice was in the
+    /// majority, marks those players as eliminated, snapshots the vault yield,
+    /// and transitions the arena back to `Open` (or to `Finished` if only one
+    /// survivor remains).
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    /// - `ArenaError::ContractPaused` if the contract is paused.
+    /// - `ArenaError::RoundNotActive` if the arena is not in the `Active` state.
+    /// - `ArenaError::RoundNotStarted` if no round start timestamp is recorded.
+    /// - `ArenaError::GracePeriodNotElapsed` if the round duration has not yet passed.
+    ///
+    /// # Events
+    /// Emits `round_resolved` with the round number, eliminated count, and survivor count.
+    /// Emits `game_finished` with the winner address and round number if exactly one survivor remains.
     pub fn resolve_round(env: Env) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
@@ -266,6 +394,28 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Claim the prize pool as the last surviving player.
+    ///
+    /// Implements checks-effects-interactions: the prize-claimed flag and arena
+    /// state are persisted to `Settled` *before* any token transfer, so a
+    /// malicious re-entrant call via the stake token sees the flag and fails
+    /// with `ArenaError::PrizeAlreadyClaimed`.
+    ///
+    /// Payout = staked principal + accumulated vault yield, capped to the
+    /// amount actually withdrawn from the vault.
+    ///
+    /// # Parameters
+    /// - `winner`: Address of the last surviving player. Must authorize this call.
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    /// - `ArenaError::ContractPaused` if the contract is paused.
+    /// - `ArenaError::GameNotFinished` if the arena is not in the `Finished` state.
+    /// - `ArenaError::PrizeAlreadyClaimed` if the prize has already been paid out (guards re-entrancy).
+    /// - `ArenaError::PlayerEliminated` if the caller was eliminated and is not the surviving winner.
+    ///
+    /// # Events
+    /// Emits `prize_claimed` with the winner address, total payout, and yield portion.
     pub fn claim(env: Env, winner: Address) -> Result<(), ArenaError> {
         winner.require_auth();
         let mut config = ArenaStorage::load_config(&env)?;
@@ -313,8 +463,18 @@ impl ArenaContract {
         Ok(())
     }
 
-    /// Propose a new admin. The current admin calls this to start the transfer.
-    /// The new admin must then call `accept_admin` to complete the transfer.
+    /// Propose a new admin address to take over contract administration.
+    ///
+    /// Begins a two-step admin transfer. The proposed address is stored as a
+    /// pending admin; control does not change until the new admin calls
+    /// `accept_admin`. Only the current admin can call this.
+    ///
+    /// # Parameters
+    /// - `new_admin`: Address being nominated to become the next admin.
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    /// - `ArenaError::ContractPaused` if the contract is paused.
     pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ArenaError> {
         let config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
@@ -323,7 +483,18 @@ impl ArenaContract {
         Ok(())
     }
 
-    /// Accept a pending admin transfer. Only the proposed new admin can call this.
+    /// Accept a pending admin transfer initiated by `propose_admin`.
+    ///
+    /// Only the address stored as the pending admin may call this. On success,
+    /// the pending admin record is deleted and the caller becomes the new admin.
+    ///
+    /// # Errors
+    /// - `ArenaError::NoPendingAdmin` if no admin transfer has been proposed.
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    /// - `ArenaError::ContractPaused` if the contract is paused.
+    ///
+    /// # Events
+    /// Emits `admin_changed` with the old and new admin addresses.
     pub fn accept_admin(env: Env) -> Result<(), ArenaError> {
         let pending = ArenaStorage::load_pending_admin(&env).ok_or(ArenaError::NoPendingAdmin)?;
         pending.new_admin.require_auth();
@@ -337,12 +508,37 @@ impl ArenaContract {
         Ok(())
     }
 
-    /// Backward-compatible alias for staging an admin transfer. The proposed
-    /// admin must still call `accept_admin` before control changes hands.
+    /// Backward-compatible alias for `propose_admin`.
+    ///
+    /// Stages an admin transfer; the proposed admin must still call
+    /// `accept_admin` before control changes hands. Prefer `propose_admin`
+    /// for new integrations.
+    ///
+    /// # Parameters
+    /// - `new_admin`: Address being nominated to become the next admin.
+    ///
+    /// # Errors
+    /// See `propose_admin`.
     pub fn change_admin(env: Env, new_admin: Address) -> Result<(), ArenaError> {
         Self::propose_admin(env, new_admin)
     }
 
+    /// Pause the contract, blocking all state-mutating gameplay entry points.
+    ///
+    /// While paused, calls to `join_arena`, `submit_commitment`, `reveal_choice`,
+    /// `resolve_round`, and `claim` all fail with `ArenaError::ContractPaused`.
+    /// Read-only queries are unaffected. Only the admin can pause.
+    ///
+    /// # Parameters
+    /// - `reason`: Short symbol describing why the contract is being paused
+    ///   (e.g., `"emerg"`, `"maint"`). Included in the emitted event for
+    ///   indexers and dashboards.
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    ///
+    /// # Events
+    /// Emits `paused` with the admin address and reason symbol.
     pub fn pause(env: Env, reason: Symbol) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
@@ -352,6 +548,16 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Resume normal operation after a `pause`.
+    ///
+    /// Clears the paused flag so all gameplay entry points become callable
+    /// again. Only the admin can unpause.
+    ///
+    /// # Errors
+    /// - `ArenaError::NotInitialised` if `initialize` has not been called.
+    ///
+    /// # Events
+    /// Emits `unpaused` with the admin address.
     pub fn unpause(env: Env) -> Result<(), ArenaError> {
         let mut config = ArenaStorage::load_config(&env)?;
         config.admin.require_auth();
@@ -361,16 +567,35 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Return the cumulative yield earned across all resolved rounds.
+    ///
+    /// Summed from vault balance deltas recorded during each `resolve_round`
+    /// call. Returns `0` if the contract has not been initialised or no rounds
+    /// have been resolved.
     pub fn get_total_yield(env: Env) -> i128 {
         ArenaStorage::load_config(&env)
             .map(|c| c.cumulative_yield)
             .unwrap_or(0)
     }
 
+    /// Return the yield snapshot recorded when `round` was resolved.
+    ///
+    /// Returns `None` if `round` has not been resolved or does not exist.
+    ///
+    /// # Parameters
+    /// - `round`: 1-based round number (the first round resolved is round 1).
     pub fn get_yield_snapshot(env: Env, round: u32) -> Option<YieldSnapshot> {
         ArenaStorage::load_yield_snapshot(&env, round)
     }
 
+    /// Return the resolution result recorded when `round` was resolved.
+    ///
+    /// Includes eliminated and survivor counts and the associated yield
+    /// snapshot. Returns `None` if `round` has not been resolved or does not
+    /// exist.
+    ///
+    /// # Parameters
+    /// - `round`: 1-based round number.
     pub fn get_round_result(env: Env, round: u32) -> Option<RoundResult> {
         ArenaStorage::load_round_result(&env, round)
     }
