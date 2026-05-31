@@ -790,6 +790,7 @@ mod test {
                     state: GameState::Active,
                     paused: false,
                     player_count: 1,
+                    cumulative_yield: 0,
                     commit_deadline: 0,
                     yield_vault: Address::generate(&env),
                     round_count: 0,
@@ -1193,3 +1194,5 @@ mod test {
         });
     }
 }
+#[cfg(test)]
+mod join_arena_tests;
