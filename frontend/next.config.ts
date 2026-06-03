@@ -1,5 +1,9 @@
 import type { NextConfig } from "next";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { withSentryConfig } from "@sentry/nextjs";
+
+const projectRoot = dirname(fileURLToPath(import.meta.url));
 
 const cspHeader = [
   "default-src 'self'",
@@ -26,6 +30,9 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  turbopack: {
+    root: projectRoot,
+  },
   async headers() {
     return [
       {
@@ -44,10 +51,12 @@ export default withSentryConfig(nextConfig, {
   // Requires SENTRY_AUTH_TOKEN (server-only; never exposed to the browser).
   widenClientFileUpload: true,
 
-  // Do not wrap Next.js middleware — we have no middleware.ts and the
-  // auto-wrap causes MIDDLEWARE_INVOCATION_FAILED on Vercel Edge deployments.
-  autoInstrumentMiddleware: false,
+  webpack: {
+    // Do not wrap Next.js middleware — we have no middleware.ts and the
+    // auto-wrap causes MIDDLEWARE_INVOCATION_FAILED on Vercel Edge deployments.
+    autoInstrumentMiddleware: false,
 
-  // Disable automatic Vercel Cron monitors — not used in this project.
-  automaticVercelMonitors: false,
+    // Disable automatic Vercel Cron monitors — not used in this project.
+    automaticVercelMonitors: false,
+  },
 });
