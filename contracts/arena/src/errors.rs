@@ -43,6 +43,13 @@ pub enum ArenaError {
     /// Treasury address has not been set
     TreasuryNotSet = 19,
     /// Contract is paused; state-mutating operations blocked
+    ContractPaused = 14,
+    /// Slash rate in bps cannot exceed 10000 (100%)
+    InvalidSlashRate = 15,
+    /// No stake available to withdraw
+    NoStakeToWithdraw = 16,
+    /// Stake amount must be positive
+    InvalidStakeAmount = 17,
     ContractPaused = 20,
     /// Arena is not in a terminal state (Finished or Cancelled) for cleanup
     ArenaNotFinished = 21,
