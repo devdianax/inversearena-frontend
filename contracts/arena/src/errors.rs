@@ -44,5 +44,7 @@ pub enum ArenaError {
     TreasuryNotSet = 19,
     /// Contract is paused; state-mutating operations blocked
     ContractPaused = 20,
+    /// Arena is not in a terminal state (Finished or Cancelled) for cleanup
+    ArenaNotFinished = 21,
 }
 

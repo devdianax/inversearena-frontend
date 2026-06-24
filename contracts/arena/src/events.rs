@@ -82,5 +82,20 @@ impl ArenaEvents {
     pub fn cooldown_configured(env: &Env, admin: &Address, cooldown_seconds: &u64) {
         env.events().publish((symbol_short!("COOLDN"), admin.clone()), *cooldown_seconds);
     }
+
+    /// Emit creator stake deposited event with creator, amount, and new total
+    pub fn creator_stake_deposited(env: &Env, creator: &Address, amount: i128, total: i128) {
+        env.events().publish((symbol_short!("CS_DEP"), creator.clone()), (amount, total));
+    }
+
+    /// Emit creator stake withdrawn event with creator, amount, and slashed flag
+    pub fn creator_stake_withdrawn(env: &Env, creator: &Address, amount: i128, slashed: bool) {
+        env.events().publish((symbol_short!("CS_WTH"), creator.clone()), (amount, slashed));
+    }
+
+    /// Emit player auto-eliminated event (AFK - did not submit a choice)
+    pub fn player_auto_eliminated(env: &Env, player: &Address) {
+        env.events().publish((symbol_short!("AFK_ELIM"),), player);
+    }
 }
 

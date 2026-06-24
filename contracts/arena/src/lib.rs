@@ -145,7 +145,7 @@ impl ArenaContract {
     /// Get the token contract address used for entry fees and payouts
     pub fn get_token(env: Env) -> Result<Address, ArenaError> {
         let config = ArenaStorage::load_config(&env)?;
-        Ok(config.token_address)
+        Ok(config.token)
     }
 
     /// Start the game (transition to InProgress state)
@@ -326,22 +326,33 @@ impl ArenaContract {
         let mut active_players = Vec::new(&env);
         let mut heads_count = 0u32;
         let mut tails_count = 0u32;
+        let mut eliminated = 0u32;
+        let mut survivors = 0u32;
 
+        // First pass: auto-eliminate AFK players (no choice submitted) before minority/majority resolution
         for player in players.iter() {
             if ArenaStorage::is_player_active(&env, &player) {
-                active_players.push_back(player.clone());
-                if let Some(choice) = ArenaStorage::load_player_choice(&env, &player) {
-                    match choice {
-                        Choice::Heads => heads_count += 1,
-                        Choice::Tails => tails_count += 1,
-                    }
+                if ArenaStorage::load_player_choice(&env, &player).is_none() {
+                    ArenaStorage::set_player_active(&env, &player, false);
+                    eliminated += 1;
+                    ArenaEvents::player_auto_eliminated(&env, &player);
+                } else {
+                    active_players.push_back(player.clone());
+                }
+            }
+        }
+
+        // Second pass: count choices among remaining active players
+        for player in active_players.iter() {
+            if let Some(choice) = ArenaStorage::load_player_choice(&env, &player) {
+                match choice {
+                    Choice::Heads => heads_count += 1,
+                    Choice::Tails => tails_count += 1,
                 }
             }
         }
 
         let active_count = active_players.len();
-        let mut eliminated = 0u32;
-        let mut survivors = 0u32;
 
         if heads_count == tails_count {
             if active_count == 2 {
@@ -358,10 +369,6 @@ impl ArenaContract {
                                 survivors += 1;
                             }
                         }
-                    } else {
-                        ArenaStorage::set_player_active(&env, &player, false);
-                        eliminated += 1;
-                        ArenaEvents::player_eliminated(&env, &player);
                     }
                 }
             } else {
@@ -385,10 +392,6 @@ impl ArenaContract {
                     } else {
                         survivors += 1;
                     }
-                } else {
-                    ArenaStorage::set_player_active(&env, &player, false);
-                    eliminated += 1;
-                    ArenaEvents::player_eliminated(&env, &player);
                 }
             }
         }
@@ -492,6 +495,41 @@ impl ArenaContract {
         Ok(())
     }
 
+    /// Expire an arena that is still in Open state past its join deadline.
+    /// Any caller can trigger this so players can claim refunds.
+    pub fn expire_arena(env: Env) -> Result<(), ArenaError> {
+        let mut config = ArenaStorage::load_config(&env)?;
+
+        if config.state != GameState::Open {
+            return Err(ArenaError::InvalidStateTransition);
+        }
+
+        let now = env.ledger().timestamp();
+        if now <= config.join_deadline {
+            return Err(ArenaError::DeadlineTooSoon);
+        }
+
+        config.state = GameState::Cancelled;
+        ArenaStorage::save_config(&env, &config);
+
+        ArenaEvents::arena_cancelled(&env);
+        Ok(())
+    }
+
+    /// Clean up transient storage data after an arena is finished or cancelled.
+    /// Preserves the ArenaConfig for historical reference. Admin only.
+    pub fn cleanup_arena(env: Env) -> Result<(), ArenaError> {
+        let config = ArenaStorage::load_config(&env)?;
+        config.admin.require_auth();
+
+        if config.state != GameState::Finished && config.state != GameState::Cancelled {
+            return Err(ArenaError::ArenaNotFinished);
+        }
+
+        ArenaStorage::cleanup_arena_data(&env);
+        Ok(())
+    }
+
     /// Claim a refund when arena is cancelled
     pub fn claim_refund(env: Env, player: Address) -> Result<(), ArenaError> {
         player.require_auth();
@@ -541,7 +579,7 @@ impl ArenaContract {
 
         ArenaStorage::save_creator_stake(&env, amount);
 
-        ArenaEvents::stake_deposited(&env, amount);
+        ArenaEvents::creator_stake_deposited(&env, &creator, amount, amount);
         Ok(())
     }
 
@@ -562,7 +600,7 @@ impl ArenaContract {
 
         ArenaStorage::save_creator_stake(&env, 0);
 
-        ArenaEvents::stake_withdrawn(&env, stake);
+        ArenaEvents::creator_stake_withdrawn(&env, &creator, stake, false);
         Ok(())
     }
 
